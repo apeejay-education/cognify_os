@@ -76,6 +76,27 @@ migrate("003_create_leads", async () => {
   `).run();
 });
 
+migrate("005_create_students", async () => {
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS students (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      admission_number TEXT UNIQUE NOT NULL,
+      lead_id INTEGER,
+      name TEXT NOT NULL,
+      email TEXT,
+      phone TEXT,
+      course TEXT,
+      batch TEXT,
+      counselor TEXT,
+      status TEXT DEFAULT 'active',
+      fee_total REAL DEFAULT 0,
+      fee_paid REAL DEFAULT 0,
+      enrolled_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    )
+  `).run();
+});
+
 migrate("004_seed_demo_data", async () => {
   // Demo owner account
   const existing = await db
@@ -115,6 +136,24 @@ migrate("004_seed_demo_data", async () => {
         .bind(name, email, phone, course, status, priority, counselor, notes, demo_date)
         .run();
     }
+  }
+});
+
+migrate("006_seed_demo_students", async () => {
+  const n = await db.prepare("SELECT COUNT(*) as n FROM students").first<{ n: number }>();
+  if (n && n.n > 0) return;
+  const rows = [
+    ["COG-2026-0001", "Sophie Chen",   "sophie@example.com",  "+91 98765 43211", "Data Science",   "Batch A - Morning",    "Priya S.",  "active",    45000, 45000],
+    ["COG-2026-0002", "Amit Kumar",    "amit@example.com",    "+91 87654 32100", "NEET Prep",      "Batch B - Evening",    "Rahul M.",  "active",    38000, 20000],
+    ["COG-2026-0003", "Deepika Nair",  "deepika@example.com", "+91 76543 21099", "CA IPCC",        "Batch C - Weekend",    "Priya S.",  "active",    52000, 52000],
+    ["COG-2026-0004", "Rahul Mehta",   "rahul.m@example.com", "+91 91234 56789", "IIT JEE",        "Batch A - Morning",    "Rahul M.",  "active",    60000, 30000],
+    ["COG-2026-0005", "Ananya Singh",  "ananya@example.com",  "+91 81234 56789", "UPSC Prep",      "Batch D - Afternoon",  "Priya S.",  "dropped",   35000, 17500],
+    ["COG-2026-0006", "Karan Patel",   "karan@example.com",   "+91 71234 56789", "CA Foundation",  "Batch B - Evening",    "Rahul M.",  "active",    28000, 28000],
+  ];
+  for (const [adm, name, email, phone, course, batch, counselor, status, fee_total, fee_paid] of rows) {
+    await db.prepare(
+      "INSERT INTO students (admission_number,name,email,phone,course,batch,counselor,status,fee_total,fee_paid) VALUES (?,?,?,?,?,?,?,?,?,?)"
+    ).bind(adm, name, email, phone, course, batch, counselor, status, fee_total, fee_paid).run();
   }
 });
 
@@ -226,4 +265,136 @@ app.patch("/api/leads/:id/status", async (c) => {
   await db.prepare("UPDATE leads SET status = ?, updated_at = datetime('now') WHERE id = ?").bind(status, id).run();
   const lead = await db.prepare("SELECT * FROM leads WHERE id = ?").bind(id).first();
   return c.json({ lead });
+});
+
+// --- Students ---
+
+async function nextAdmissionNumber(): Promise<string> {
+  const year = new Date().getFullYear();
+  const last = await db
+    .prepare("SELECT admission_number FROM students ORDER BY id DESC LIMIT 1")
+    .first<{ admission_number: string }>();
+  let seq = 1;
+  if (last) {
+    const parts = last.admission_number.split("-");
+    seq = parseInt(parts[parts.length - 1]) + 1;
+  }
+  return `COG-${year}-${String(seq).padStart(4, "0")}`;
+}
+
+app.get("/api/students", async (c) => {
+  const user = await getSessionUser(getBearerToken(c));
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+
+  const search = c.req.query("search") ?? "";
+  const statusFilter = c.req.query("status") ?? "";
+
+  let query = "SELECT * FROM students";
+  const conditions: string[] = [];
+  const binds: string[] = [];
+
+  if (search) {
+    conditions.push("(name LIKE ? OR phone LIKE ? OR email LIKE ? OR admission_number LIKE ? OR course LIKE ?)");
+    const s = `%${search}%`;
+    binds.push(s, s, s, s, s);
+  }
+  if (statusFilter) {
+    conditions.push("status = ?");
+    binds.push(statusFilter);
+  }
+  if (conditions.length) query += " WHERE " + conditions.join(" AND ");
+  query += " ORDER BY enrolled_at DESC";
+
+  const stmt = binds.reduce((s, b) => s.bind(b), db.prepare(query));
+  const result = await (binds.length ? stmt : db.prepare(query)).all();
+
+  const [total, active, dropped, feeResult] = await Promise.all([
+    db.prepare("SELECT COUNT(*) as n FROM students").first<{ n: number }>(),
+    db.prepare("SELECT COUNT(*) as n FROM students WHERE status = 'active'").first<{ n: number }>(),
+    db.prepare("SELECT COUNT(*) as n FROM students WHERE status = 'dropped'").first<{ n: number }>(),
+    db.prepare("SELECT SUM(fee_total - fee_paid) as pending FROM students WHERE status = 'active'").first<{ pending: number }>(),
+  ]);
+
+  return c.json({
+    students: result.results ?? [],
+    stats: {
+      total: total?.n ?? 0,
+      active: active?.n ?? 0,
+      dropped: dropped?.n ?? 0,
+      feePending: feeResult?.pending ?? 0,
+    },
+  });
+});
+
+app.get("/api/students/:id", async (c) => {
+  const user = await getSessionUser(getBearerToken(c));
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const student = await db.prepare("SELECT * FROM students WHERE id = ?").bind(c.req.param("id")).first();
+  if (!student) return c.json({ error: "Not found" }, 404);
+  return c.json({ student });
+});
+
+app.post("/api/students/enroll", async (c) => {
+  const user = await getSessionUser(getBearerToken(c));
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+
+  const body = await c.req.json<{
+    lead_id?: number; name: string; email?: string; phone?: string;
+    course?: string; batch?: string; counselor?: string;
+    fee_total?: number;
+  }>();
+  if (!body.name?.trim()) return c.json({ error: "Name required" }, 400);
+
+  const admissionNumber = await nextAdmissionNumber();
+
+  const result = await db.prepare(`
+    INSERT INTO students (admission_number, lead_id, name, email, phone, course, batch, counselor, fee_total, fee_paid)
+    VALUES (?,?,?,?,?,?,?,?,?,0)
+  `).bind(
+    admissionNumber, body.lead_id ?? null, body.name,
+    body.email ?? null, body.phone ?? null,
+    body.course ?? null, body.batch ?? null,
+    body.counselor ?? null, body.fee_total ?? 0
+  ).run();
+
+  if (body.lead_id) {
+    await db.prepare("UPDATE leads SET status = 'admitted', updated_at = datetime('now') WHERE id = ?")
+      .bind(body.lead_id).run();
+  }
+
+  const student = await db.prepare("SELECT * FROM students WHERE id = ?").bind(result.meta.last_row_id).first();
+  return c.json({ student, admissionNumber }, 201);
+});
+
+app.patch("/api/students/:id", async (c) => {
+  const user = await getSessionUser(getBearerToken(c));
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+
+  const body = await c.req.json<{
+    status?: string; batch?: string; fee_paid?: number; fee_total?: number;
+    course?: string; counselor?: string; phone?: string; email?: string;
+  }>();
+
+  const fields: string[] = [];
+  const vals: (string | number)[] = [];
+
+  if (body.status !== undefined) { fields.push("status = ?"); vals.push(body.status); }
+  if (body.batch !== undefined) { fields.push("batch = ?"); vals.push(body.batch); }
+  if (body.fee_paid !== undefined) { fields.push("fee_paid = ?"); vals.push(body.fee_paid); }
+  if (body.fee_total !== undefined) { fields.push("fee_total = ?"); vals.push(body.fee_total); }
+  if (body.course !== undefined) { fields.push("course = ?"); vals.push(body.course); }
+  if (body.counselor !== undefined) { fields.push("counselor = ?"); vals.push(body.counselor); }
+  if (body.phone !== undefined) { fields.push("phone = ?"); vals.push(body.phone); }
+  if (body.email !== undefined) { fields.push("email = ?"); vals.push(body.email); }
+
+  if (!fields.length) return c.json({ error: "Nothing to update" }, 400);
+
+  fields.push("updated_at = datetime('now')");
+  vals.push(c.req.param("id"));
+
+  await db.prepare(`UPDATE students SET ${fields.join(", ")} WHERE id = ?`)
+    .bind(...vals).run();
+
+  const student = await db.prepare("SELECT * FROM students WHERE id = ?").bind(c.req.param("id")).first();
+  return c.json({ student });
 });

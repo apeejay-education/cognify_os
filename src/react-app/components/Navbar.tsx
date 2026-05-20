@@ -2,8 +2,8 @@ import { useApp, type Page } from "../App";
 
 const NAV_LINKS: { label: string; page: Page | null }[] = [
   { label: "Dashboard", page: "dashboard" },
+  { label: "Students", page: "students" },
   { label: "CRM", page: "crm" },
-  { label: "Curriculum", page: null },
   { label: "Insights", page: null },
 ];
 

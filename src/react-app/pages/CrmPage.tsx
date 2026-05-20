@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import Navbar from "../components/Navbar";
 import { useApp } from "../App";
+import type { Page } from "../App";
 
 interface Lead {
   id: number;
@@ -32,7 +33,7 @@ function timeAgo(dateStr: string) {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-function LeadCard({ lead, onMove }: { lead: Lead; onMove: (id: number, status: Lead["status"]) => void }) {
+function LeadCard({ lead, onMove, onEnroll }: { lead: Lead; onMove: (id: number, status: Lead["status"]) => void; onEnroll?: (lead: Lead) => void }) {
   const isAdmitted = lead.status === "admitted";
 
   return (
@@ -89,8 +90,16 @@ function LeadCard({ lead, onMove }: { lead: Lead; onMove: (id: number, status: L
             </span>
           )}
         </div>
-        {/* Move to next stage */}
-        {lead.status !== "admitted" && (
+        {/* Move to next stage / Enroll */}
+        {lead.status === "admitted" ? (
+          <button
+            onClick={(e) => { e.stopPropagation(); onEnroll?.(lead); }}
+            className="text-[11px] font-bold text-green-700 px-3 py-1 rounded-full border border-green-200 bg-green-50 hover:bg-green-600 hover:text-white transition-colors flex items-center gap-1"
+          >
+            <span className="material-symbols-outlined text-sm">person_add</span>
+            Enroll
+          </button>
+        ) : (
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -168,11 +177,12 @@ function AddLeadModal({ onClose, onAdd }: AddLeadModalProps) {
 }
 
 export default function CrmPage() {
-  const { token } = useApp();
+  const { token, navigate } = useApp();
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [search, setSearch] = useState("");
+  const [enrolling, setEnrolling] = useState<Lead | null>(null);
 
   useEffect(() => {
     fetch("/api/leads", { headers: { Authorization: `Bearer ${token}` } })
@@ -191,6 +201,22 @@ export default function CrmPage() {
     const data = await res.json();
     if (data.lead) {
       setLeads((prev) => prev.map((l) => (l.id === id ? data.lead : l)));
+    }
+  };
+
+  const quickEnroll = async (lead: Lead) => {
+    const res = await fetch("/api/students/enroll", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        lead_id: lead.id, name: lead.name, email: lead.email,
+        phone: lead.phone, course: lead.course_interest, counselor: lead.counselor,
+      }),
+    });
+    const data = await res.json();
+    if (data.admissionNumber) {
+      alert(`✓ ${lead.name} enrolled!\nAdmission No: ${data.admissionNumber}\n\nView in Students directory.`);
+      navigate("students" as Page);
     }
   };
 
@@ -277,7 +303,7 @@ export default function CrmPage() {
                       </div>
                     ) : (
                       colLeads.map((lead) => (
-                        <LeadCard key={lead.id} lead={lead} onMove={moveLeadStatus} />
+                        <LeadCard key={lead.id} lead={lead} onMove={moveLeadStatus} onEnroll={quickEnroll} />
                       ))
                     )}
                   </div>

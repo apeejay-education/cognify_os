@@ -2,8 +2,9 @@ import { useState, useEffect, createContext, useContext } from "react";
 import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
 import CrmPage from "./pages/CrmPage";
+import StudentsPage from "./pages/StudentsPage";
 
-export type Page = "login" | "dashboard" | "crm";
+export type Page = "login" | "dashboard" | "crm" | "students";
 
 export interface AuthUser {
   name: string;
@@ -93,6 +94,7 @@ export default function App() {
       {page === "login" && <LoginPage onLogin={handleLogin} />}
       {page === "dashboard" && <DashboardPage />}
       {page === "crm" && <CrmPage />}
+      {page === "students" && <StudentsPage />}
     </AppCtx.Provider>
   );
 }
